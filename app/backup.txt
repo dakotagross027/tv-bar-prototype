@@ -1,0 +1,645 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+type Priority = "free" | "boost" | "next";
+
+type RequestItem = {
+  id: string;
+  game: string;
+  priority: Priority;
+  createdAt: number;
+};
+
+type TV = {
+  id: string;
+  name: string;
+  locked: boolean;
+  currentGame: string | null;
+  currentEndsAt: number | null;
+  queue: RequestItem[];
+};
+
+const SLOT_SECONDS = 20;
+
+const priorityRank: Record<Priority, number> = {
+  free: 0,
+  boost: 1,
+  next: 2,
+};
+
+function sortQueue(queue: RequestItem[]) {
+  return [...queue].sort((a, b) => {
+    const priorityDiff = priorityRank[b.priority] - priorityRank[a.priority];
+    if (priorityDiff !== 0) return priorityDiff;
+    return a.createdAt - b.createdAt;
+  });
+}
+
+function formatRemaining(ms: number | null) {
+  if (!ms || ms <= 0) return "0s";
+  const totalSeconds = Math.ceil(ms / 1000);
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  if (mins > 0) return `${mins}:${secs.toString().padStart(2, "0")}`;
+  return `${secs}s`;
+}
+
+function priorityLabel(priority: Priority) {
+  if (priority === "free") return "Free";
+  if (priority === "boost") return "Boost $3";
+  return "Next Up $10";
+}
+
+function priorityColor(priority: Priority) {
+  if (priority === "free") return "#6b7280";
+  if (priority === "boost") return "#d97706";
+  return "#dc2626";
+}
+
+export default function Home() {
+  const [tvs, setTvs] = useState<TV[]>([
+    {
+      id: "A",
+      name: "TV A",
+      locked: false,
+      currentGame: null,
+      currentEndsAt: null,
+      queue: [],
+    },
+    {
+      id: "B",
+      name: "TV B",
+      locked: false,
+      currentGame: null,
+      currentEndsAt: null,
+      queue: [],
+    },
+    {
+      id: "C",
+      name: "TV C",
+      locked: false,
+      currentGame: null,
+      currentEndsAt: null,
+      queue: [],
+    },
+  ]);
+
+  const [selectedTvId, setSelectedTvId] = useState<string>("A");
+  const [gameName, setGameName] = useState("");
+  const [priority, setPriority] = useState<Priority>("free");
+  const [tick, setTick] = useState(Date.now());
+  const [view, setView] = useState<"customer" | "dashboard">("customer");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTick(Date.now());
+      setTvs((prev) =>
+        prev.map((tv) => {
+          if (tv.currentEndsAt && tv.currentEndsAt <= Date.now()) {
+            return advanceSingleTV(tv);
+          }
+          return tv;
+        })
+      );
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  const totalRequestsTonight = useMemo(() => {
+    return tvs.reduce((sum, tv) => {
+      const active = tv.currentGame ? 1 : 0;
+      return sum + active + tv.queue.length;
+    }, 0);
+  }, [tvs]);
+
+  const selectedTv = tvs.find((tv) => tv.id === selectedTvId)!;
+  const peopleAhead = selectedTv ? selectedTv.queue.length : 0;
+
+  function submitRequest() {
+    const trimmed = gameName.trim();
+    if (!trimmed) {
+      setMessage("Enter a game first.");
+      return;
+    }
+
+    setTvs((prev) =>
+      prev.map((tv) => {
+        if (tv.id !== selectedTvId) return tv;
+        if (tv.locked) return tv;
+
+        const request: RequestItem = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          game: trimmed,
+          priority,
+          createdAt: Date.now(),
+        };
+
+        const nextQueue = sortQueue([...tv.queue, request]);
+
+        if (!tv.currentGame) {
+          const [first, ...rest] = nextQueue;
+          return {
+            ...tv,
+            currentGame: first.game,
+            currentEndsAt: Date.now() + SLOT_SECONDS * 1000,
+            queue: rest,
+          };
+        }
+
+        return {
+          ...tv,
+          queue: nextQueue,
+        };
+      })
+    );
+
+    setMessage(
+      priority === "free"
+        ? "Free request added."
+        : priority === "boost"
+        ? "Boost request added."
+        : "Next Up request added."
+    );
+    setGameName("");
+    setPriority("free");
+  }
+
+  function advanceSingleTV(tv: TV): TV {
+    if (tv.queue.length === 0) {
+      return {
+        ...tv,
+        currentGame: null,
+        currentEndsAt: null,
+      };
+    }
+
+    const sorted = sortQueue(tv.queue);
+    const [next, ...rest] = sorted;
+
+    return {
+      ...tv,
+      currentGame: next.game,
+      currentEndsAt: Date.now() + SLOT_SECONDS * 1000,
+      queue: rest,
+    };
+  }
+
+  function advanceTV(tvId: string) {
+    setTvs((prev) =>
+      prev.map((tv) => (tv.id === tvId ? advanceSingleTV(tv) : tv))
+    );
+  }
+
+  function toggleLock(tvId: string) {
+    setTvs((prev) =>
+      prev.map((tv) =>
+        tv.id === tvId ? { ...tv, locked: !tv.locked } : tv
+      )
+    );
+  }
+
+  function clearAll() {
+    setTvs([
+      {
+        id: "A",
+        name: "TV A",
+        locked: false,
+        currentGame: null,
+        currentEndsAt: null,
+        queue: [],
+      },
+      {
+        id: "B",
+        name: "TV B",
+        locked: false,
+        currentGame: null,
+        currentEndsAt: null,
+        queue: [],
+      },
+      {
+        id: "C",
+        name: "TV C",
+        locked: false,
+        currentGame: null,
+        currentEndsAt: null,
+        queue: [],
+      },
+    ]);
+    setMessage("Prototype reset.");
+  }
+
+  return (
+    <main
+      style={{
+        minHeight: "100vh",
+        background: "#0b1220",
+        color: "white",
+        fontFamily: "Arial, sans-serif",
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1200,
+          margin: "0 auto",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            marginBottom: 24,
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <h1 style={{ fontSize: 32, margin: 0 }}>TV Bar Prototype</h1>
+            <p style={{ color: "#94a3b8", marginTop: 8 }}>
+              Simulated sports bar TV reservation system
+            </p>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={() => setView("customer")}
+              style={buttonStyle(view === "customer")}
+            >
+              Customer View
+            </button>
+            <button
+              onClick={() => setView("dashboard")}
+              style={buttonStyle(view === "dashboard")}
+            >
+              Staff Dashboard
+            </button>
+            <button
+              onClick={clearAll}
+              style={{
+                ...buttonStyle(false),
+                background: "#7f1d1d",
+                borderColor: "#b91c1c",
+              }}
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginBottom: 20,
+            padding: 16,
+            borderRadius: 12,
+            background: "#111827",
+            border: "1px solid #1f2937",
+          }}
+        >
+          <strong>Used {totalRequestsTonight} times tonight</strong>
+          <div style={{ color: "#94a3b8", marginTop: 8 }}>
+            Demo timing: each TV slot lasts {SLOT_SECONDS} seconds
+          </div>
+        </div>
+
+        {view === "customer" ? (
+          <>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+                gap: 16,
+                marginBottom: 24,
+              }}
+            >
+              {tvs.map((tv) => {
+                const remaining = tv.currentEndsAt
+                  ? tv.currentEndsAt - tick
+                  : null;
+
+                return (
+                  <div
+                    key={tv.id}
+                    onClick={() => setSelectedTvId(tv.id)}
+                    style={{
+                      border:
+                        selectedTvId === tv.id
+                          ? "2px solid #60a5fa"
+                          : "1px solid #334155",
+                      borderRadius: 16,
+                      padding: 16,
+                      background: "#111827",
+                      cursor: "pointer",
+                      opacity: tv.locked ? 0.7 : 1,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 12,
+                      }}
+                    >
+                      <h2 style={{ margin: 0 }}>{tv.name}</h2>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          padding: "4px 8px",
+                          borderRadius: 999,
+                          background: tv.locked ? "#7f1d1d" : "#14532d",
+                        }}
+                      >
+                        {tv.locked ? "Locked" : "Open"}
+                      </span>
+                    </div>
+
+                    <div style={{ color: "#cbd5e1", marginBottom: 8 }}>
+                      <strong>Now playing:</strong>{" "}
+                      {tv.currentGame ? tv.currentGame : "Idle"}
+                    </div>
+
+                    <div style={{ color: "#cbd5e1", marginBottom: 8 }}>
+                      <strong>Time remaining:</strong>{" "}
+                      {tv.currentGame ? formatRemaining(remaining) : "-"}
+                    </div>
+
+                    <div style={{ color: "#cbd5e1" }}>
+                      <strong>Queue:</strong> {tv.queue.length}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div
+              style={{
+                background: "#111827",
+                border: "1px solid #334155",
+                borderRadius: 16,
+                padding: 20,
+              }}
+            >
+              <h2 style={{ marginTop: 0 }}>Request a TV</h2>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>Choose TV</label>
+                <select
+                  value={selectedTvId}
+                  onChange={(e) => setSelectedTvId(e.target.value)}
+                  style={inputStyle}
+                >
+                  {tvs.map((tv) => (
+                    <option key={tv.id} value={tv.id}>
+                      {tv.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>Game or event</label>
+                <input
+                  value={gameName}
+                  onChange={(e) => setGameName(e.target.value)}
+                  placeholder="Broncos vs Chiefs, UFC 300, Nuggets game..."
+                  style={inputStyle}
+                />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={labelStyle}>Priority</label>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                    gap: 12,
+                  }}
+                >
+                  {(["free", "boost", "next"] as Priority[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPriority(p)}
+                      style={{
+                        padding: 16,
+                        borderRadius: 12,
+                        textAlign: "left",
+                        border:
+                          priority === p
+                            ? "2px solid #60a5fa"
+                            : "1px solid #334155",
+                        background: "#0f172a",
+                        color: "white",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                        {priorityLabel(p)}
+                      </div>
+                      <div style={{ color: "#94a3b8", fontSize: 14 }}>
+                        {p === "free" && "Added normally to the queue"}
+                        {p === "boost" && "Higher priority"}
+                        {p === "next" && "Guaranteed highest priority"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                style={{
+                  marginBottom: 16,
+                  color: "#cbd5e1",
+                  lineHeight: 1.6,
+                }}
+              >
+                <div>People ahead of you: {peopleAhead}</div>
+                {peopleAhead > 1 && (
+                  <div style={{ color: "#fca5a5", fontWeight: 700 }}>
+                    Skip the line — $10
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={submitRequest}
+                disabled={selectedTv.locked}
+                style={{
+                  padding: "12px 18px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: selectedTv.locked ? "#475569" : "#2563eb",
+                  color: "white",
+                  fontWeight: 700,
+                  cursor: selectedTv.locked ? "not-allowed" : "pointer",
+                }}
+              >
+                {selectedTv.locked ? "Selected TV is locked" : "Submit Request"}
+              </button>
+
+              {message && (
+                <div style={{ marginTop: 16, color: "#86efac" }}>{message}</div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+              gap: 16,
+            }}
+          >
+            {tvs.map((tv) => {
+              const remaining = tv.currentEndsAt
+                ? tv.currentEndsAt - tick
+                : null;
+
+              return (
+                <div
+                  key={tv.id}
+                  style={{
+                    background: "#111827",
+                    border: "1px solid #334155",
+                    borderRadius: 16,
+                    padding: 20,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 12,
+                    }}
+                  >
+                    <h2 style={{ margin: 0 }}>{tv.name}</h2>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        padding: "4px 8px",
+                        borderRadius: 999,
+                        background: tv.locked ? "#7f1d1d" : "#14532d",
+                      }}
+                    >
+                      {tv.locked ? "Locked" : "Open"}
+                    </span>
+                  </div>
+
+                  <div style={{ marginBottom: 8 }}>
+                    <strong>Current:</strong> {tv.currentGame ?? "Idle"}
+                  </div>
+
+                  <div style={{ marginBottom: 8 }}>
+                    <strong>Time left:</strong>{" "}
+                    {tv.currentGame ? formatRemaining(remaining) : "-"}
+                  </div>
+
+                  <div style={{ marginBottom: 12 }}>
+                    <strong>Queue length:</strong> {tv.queue.length}
+                  </div>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <strong>Queue</strong>
+                    {tv.queue.length === 0 ? (
+                      <div style={{ color: "#94a3b8", marginTop: 8 }}>
+                        No queued requests
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                        {sortQueue(tv.queue).map((request, index) => (
+                          <div
+                            key={request.id}
+                            style={{
+                              border: "1px solid #334155",
+                              borderRadius: 10,
+                              padding: 10,
+                              background: "#0f172a",
+                            }}
+                          >
+                            <div style={{ fontWeight: 700 }}>
+                              {index + 1}. {request.game}
+                            </div>
+                            <div
+                              style={{
+                                color: priorityColor(request.priority),
+                                fontSize: 14,
+                                marginTop: 4,
+                              }}
+                            >
+                              {priorityLabel(request.priority)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => advanceTV(tv.id)}
+                      style={dashboardButtonStyle("#2563eb")}
+                    >
+                      Next
+                    </button>
+                    <button
+                      onClick={() => toggleLock(tv.id)}
+                      style={dashboardButtonStyle(
+                        tv.locked ? "#166534" : "#991b1b"
+                      )}
+                    >
+                      {tv.locked ? "Unlock" : "Lock"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function buttonStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: active ? "2px solid #60a5fa" : "1px solid #334155",
+    background: active ? "#1d4ed8" : "#111827",
+    color: "white",
+    fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+function dashboardButtonStyle(background: string): React.CSSProperties {
+  return {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "none",
+    background,
+    color: "white",
+    fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: 12,
+  borderRadius: 10,
+  border: "1px solid #334155",
+  background: "#0f172a",
+  color: "white",
+  marginTop: 6,
+};
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  fontWeight: 700,
+  marginBottom: 4,
+};

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/dakot/tv-bar-prototype/app -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\) ! -path */.*)",
+      "Bash(find /c/Users/dakot/tv-bar-prototype/lib -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\) ! -path */.*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(node -e \"const {NextConfig} = require\\(''''./node_modules/next/dist/types.js''''\\); console.log\\(''''ok''''\\)\")",
+      "Bash(xargs grep:*)",
+      "Bash(node -e \":*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npx next:*)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :3000)",
+      "Bash(curl -s http://localhost:57978/)"
+    ]
+  }
+}
