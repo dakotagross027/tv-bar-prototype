@@ -2,23 +2,38 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { advanceTVInDB, loadTVs } from "../../lib/db";
+import { loadTVs } from "../../lib/db";
+import { useAdvanceExpired } from "../hooks/useAdvanceExpired";
 import { useSupabaseSync } from "../hooks/useSupabaseSync";
 import { formatRemaining } from "../prototype";
 
 export default function JoinPage() {
   const [tvs, setTvs] = useState<Awaited<ReturnType<typeof loadTVs>>>([]);
-  const [tick, setTick] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
 
-  // Always-fresh ref so the setInterval closure sees current TV state.
-  const tvsRef = useRef(tvs);
-  useEffect(() => { tvsRef.current = tvs; }, [tvs]);
+  // Monotonic generation counter: prevents a slow stale fetch from overwriting
+  // a newer one when multiple concurrent refreshes are in flight.
+  const loadGenRef = useRef(0);
 
+  async function freshLoad(label: string) {
+    const myGen = ++loadGenRef.current;
+    try {
+      const data = await loadTVs();
+      if (myGen === loadGenRef.current) setTvs(data);
+    } catch (err: unknown) {
+      console.error(
+        `[BarTV] ${label} loadTVs failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  // Initial load
   useEffect(() => {
+    const myGen = ++loadGenRef.current;
     loadTVs()
       .then((data) => {
-        setTvs(data);
+        if (myGen === loadGenRef.current) setTvs(data);
         setLoaded(true);
       })
       .catch((err: unknown) => {
@@ -27,41 +42,15 @@ export default function JoinPage() {
       });
   }, []);
 
-  // Per-second tick + advance expired slots.
-  // The atomic conditional UPDATE prevents double-advance races between tabs,
-  // so it's safe to run this on every page that shows a live countdown.
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      setTick(Date.now());
-      const now = Date.now();
-      const expired = tvsRef.current.filter(
-        (tv) => tv.currentEndsAt !== null && tv.currentEndsAt <= now + 100
-      );
-      if (expired.length === 0) return;
-
-      for (const tv of expired) {
-        await advanceTVInDB(tv.id).catch((err) =>
-          console.error(
-            `[BarTV] join advance failed for ${tv.id}:`,
-            err instanceof Error ? err.message : err
-          )
-        );
-      }
-      loadTVs()
-        .then(setTvs)
-        .catch((err) =>
-          console.error("[BarTV] join post-advance refresh failed:", err instanceof Error ? err.message : err)
-        );
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // Single hook: 1-second tick for countdown display + advances expired slots.
+  // The atomic conditional UPDATE in advanceTVInDB prevents double-advance
+  // races when multiple tabs or pages detect expiry simultaneously.
+  const tick = useAdvanceExpired(tvs, () => freshLoad("join-timer"));
 
   // Polling fallback: 5-second interval keeps the landing page current
   // even if realtime subscription events are missed.
   useEffect(() => {
-    const poll = setInterval(() => {
-      loadTVs().then(setTvs).catch(console.warn);
-    }, 5_000);
+    const poll = setInterval(() => freshLoad("join-poll"), 5_000);
     return () => clearInterval(poll);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -155,11 +144,8 @@ export default function JoinPage() {
 
         {/* Footer */}
         <div style={footerStyle}>
-          <span style={{ color: "#1e293b" }}>
-            Staff?{" "}
-            <Link href="/dashboard" style={staffLinkStyle}>
-              Open dashboard
-            </Link>
+          <span style={{ color: "#334155" }}>
+            Powered by BarTV
           </span>
         </div>
       </div>
@@ -341,8 +327,3 @@ const footerStyle: React.CSSProperties = {
   marginTop: 4,
 };
 
-const staffLinkStyle: React.CSSProperties = {
-  color: "#334155",
-  textDecoration: "none",
-  fontWeight: 600,
-};

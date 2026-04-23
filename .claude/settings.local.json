@@ -12,7 +12,12 @@
       "Bash(npx next:*)",
       "Bash(netstat -ano)",
       "Bash(findstr :3000)",
-      "Bash(curl -s http://localhost:57978/)"
+      "Bash(curl -s http://localhost:57978/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/)",
+      "Bash(ls C:/Users/dakot/tv-bar-prototype/.env*)",
+      "Bash(curl -s http://localhost:3000/dashboard)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST http://localhost:3000/api/staff-auth -H \"Content-Type: application/json\" -d '{\"passcode\":\"bartv2024\"}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -X POST http://localhost:3000/api/staff-auth -H \"Content-Type: application/json\" -d '{\"passcode\":\"wrong\"}')"
     ]
   }
 }

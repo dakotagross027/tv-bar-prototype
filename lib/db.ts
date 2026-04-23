@@ -3,6 +3,7 @@ import {
   type PaymentStatus,
   type PendingRequest,
   type Priority,
+  type QueueStatus,
   type RequestItem,
   type RequestStatus,
   type TV,
@@ -26,8 +27,11 @@ type RequestRow = {
   game: string;
   priority: Priority;
   created_at: string;
-  status: "queued" | "active" | "done";
+  /** Queue lifecycle position. 'queued' is the ONLY queue-eligible value. */
+  status: QueueStatus;
+  /** Bartender approval outcome. Orthogonal to status. */
   request_status: RequestStatus;
+  /** Billing outcome. Set at confirmation or decline time. */
   payment_status: PaymentStatus;
 };
 
@@ -84,6 +88,9 @@ export async function loadTVs(): Promise<TV[]> {
       supabase
         .from("requests")
         .select("*")
+        // Queue-eligibility requires both conditions.  status='queued' alone
+        // includes pending-approval rows (request_status='pending'), which must
+        // remain invisible until the bartender confirms them.
         .eq("status", "queued")
         .eq("request_status", "confirmed")
         .order("created_at"),
@@ -126,7 +133,9 @@ export async function advanceTVInDB(
   tvId: string,
   { force = false } = {}
 ): Promise<void> {
-  // ── 1. Fetch queued requests for this TV ─────────────────────────────────
+  // ── 1. Fetch queue-eligible requests for this TV ─────────────────────────
+  // Both conditions required: status='queued' excludes active/done rows;
+  // request_status='confirmed' excludes pending-approval rows.
   const { data: reqRows, error: reqErr } = await supabase
     .from("requests")
     .select("*")
@@ -237,9 +246,16 @@ export async function advanceTVInDB(
 }
 
 /**
- * Add a new guest request. The request starts in "pending" state awaiting
- * bartender confirmation. Returns the new request's ID so the customer page
- * can track its confirmation status.
+ * Add a new guest request.
+ *
+ * Inserts with status='queued' (satisfies the DB constraint) and
+ * request_status='pending' (bartender has not yet acted).
+ *
+ * Queue-eligibility requires BOTH status='queued' AND request_status='confirmed',
+ * so this request is invisible to loadTVs and advanceTVInDB until the bartender
+ * calls confirmRequest().
+ *
+ * Returns the new request's ID so the customer page can poll for approval.
  */
 export async function addRequest(
   tvId: string,
@@ -252,8 +268,8 @@ export async function addRequest(
       tv_id: tvId,
       game,
       priority,
-      status: "queued",
-      request_status: "pending",
+      status: "queued",                    // valid per DB constraint
+      request_status: "pending",           // hidden from queue until confirmed
       payment_status: "awaiting_confirmation",
     })
     .select("id")
@@ -264,9 +280,14 @@ export async function addRequest(
 }
 
 /**
- * Bartender confirms a pending request. Marks it as confirmed (and charged if
- * non-free), then auto-advances the TV if it is currently idle so the game
- * starts playing immediately.
+ * Bartender confirms a pending request.
+ *
+ * Sets status = 'queued' — this is the gate that makes the request visible
+ * to loadTVs and advanceTVInDB.  Also records the approval outcome in
+ * request_status and resolves payment_status.
+ *
+ * If the TV is currently idle, auto-advances it so the confirmed request
+ * starts playing immediately rather than waiting for the next timer tick.
  */
 export async function confirmRequest(id: string): Promise<void> {
   // Fetch the request to know tvId and priority (needed for payment status)
@@ -282,7 +303,12 @@ export async function confirmRequest(id: string): Promise<void> {
 
   const { error: updateErr } = await supabase
     .from("requests")
-    .update({ request_status: "confirmed", payment_status: paymentStatus })
+    .update({
+      // status stays 'queued' — already set at insert time.
+      // Setting request_status='confirmed' makes it queue-eligible.
+      request_status: "confirmed",
+      payment_status: paymentStatus,
+    })
     .eq("id", id);
   if (updateErr) throw toError(updateErr, "confirmRequest/update");
 
@@ -313,7 +339,9 @@ export async function declineRequest(id: string): Promise<void> {
 }
 
 /**
- * Load all pending (unconfirmed) requests across all TVs, for the dashboard.
+ * Load all requests awaiting bartender review, for the dashboard panel.
+ * Filters on request_status='pending' (bartender has not yet acted) and
+ * status='queued' (excludes declined rows which land at status='done').
  */
 export async function loadPendingRequests(): Promise<PendingRequest[]> {
   const [{ data: tvRows, error: tvErr }, { data: reqRows, error: reqErr }] =
@@ -322,8 +350,8 @@ export async function loadPendingRequests(): Promise<PendingRequest[]> {
       supabase
         .from("requests")
         .select("*")
+        .eq("status", "queued")
         .eq("request_status", "pending")
-        .neq("status", "done")
         .order("created_at"),
     ]);
 
@@ -406,9 +434,9 @@ export async function resetAllTVs(): Promise<void> {
 
   // ── 2. Restore TV rows ────────────────────────────────────────────────────
   const { error: upsertErr } = await supabase.from("tvs").upsert([
-    { id: "A", name: "TV A", locked: false, current_game: "NFL · Broncos vs. Chiefs",           current_ends_at: endsAt },
-    { id: "B", name: "TV B", locked: false, current_game: "NHL · Avalanche vs. Golden Knights", current_ends_at: endsAt },
-    { id: "C", name: "TV C", locked: false, current_game: null,                                 current_ends_at: null   },
+    { id: "A", name: "Main Bar", locked: false, current_game: "NFL · Broncos vs. Chiefs",           current_ends_at: endsAt },
+    { id: "B", name: "Patio",    locked: false, current_game: "NHL · Avalanche vs. Golden Knights", current_ends_at: endsAt },
+    { id: "C", name: "Back Bar", locked: false, current_game: null,                                 current_ends_at: null   },
   ]);
   if (upsertErr) throw toError(upsertErr, "resetAllTVs/upsert");
 

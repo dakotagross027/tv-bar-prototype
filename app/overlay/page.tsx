@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { advanceTVInDB, loadTVs } from "../../lib/db";
+import { loadTVs } from "../../lib/db";
+import { useAdvanceExpired } from "../hooks/useAdvanceExpired";
 import { useSupabaseSync } from "../hooks/useSupabaseSync";
 import {
   type Priority,
@@ -14,53 +15,43 @@ import {
 export default function OverlayPage() {
   const [tvs, setTvs] = useState<Awaited<ReturnType<typeof loadTVs>>>([]);
   const [dbError, setDbError] = useState<string | null>(null);
-  const [tick, setTick] = useState(Date.now());
 
-  const tvsRef = useRef(tvs);
-  useEffect(() => { tvsRef.current = tvs; }, [tvs]);
+  // Monotonic generation counter: prevents a slow stale fetch from overwriting
+  // a newer one when multiple concurrent refreshes are in flight.
+  const loadGenRef = useRef(0);
 
+  async function freshLoad(label: string) {
+    const myGen = ++loadGenRef.current;
+    try {
+      const data = await loadTVs();
+      if (myGen === loadGenRef.current) setTvs(data);
+    } catch (err: unknown) {
+      console.error(
+        `[BarTV] ${label} loadTVs failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  // Initial load
   useEffect(() => {
+    const myGen = ++loadGenRef.current;
     loadTVs()
-      .then(setTvs)
+      .then((data) => { if (myGen === loadGenRef.current) setTvs(data); })
       .catch((err: unknown) => {
         setDbError(err instanceof Error ? err.message : "Failed to load from database");
       });
   }, []);
 
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      setTick(Date.now());
-      const now = Date.now();
-      const expired = tvsRef.current.filter(
-        (tv) => tv.currentEndsAt !== null && tv.currentEndsAt <= now + 100
-      );
-      if (expired.length === 0) return;
+  // Single hook: 1-second tick for countdown display + advances expired slots.
+  const tick = useAdvanceExpired(tvs, () => freshLoad("overlay-timer"));
 
-      for (const tv of expired) {
-        await advanceTVInDB(tv.id).catch((err) =>
-          console.error(
-            `[BarTV] overlay advance failed for ${tv.id}:`,
-            err instanceof Error ? err.message : err
-          )
-        );
-      }
-      // Force-refresh so the overlay reflects the new state immediately
-      loadTVs()
-        .then(setTvs)
-        .catch((err) =>
-          console.error("[BarTV] overlay post-advance refresh failed:", err instanceof Error ? err.message : err)
-        );
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Polling fallback: keep overlay in sync even without realtime events
+  // Polling fallback: 5s keeps overlay current even if realtime is interrupted.
+  // Generation-guarded via freshLoad to prevent stale overwrites.
   useEffect(() => {
-    const poll = setInterval(() => {
-      loadTVs().then(setTvs).catch(console.warn);
-    }, 15_000);
+    const poll = setInterval(() => freshLoad("overlay-poll"), 5_000);
     return () => clearInterval(poll);
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Realtime sync: overlay reflects dashboard actions without a page refresh
   useSupabaseSync(setTvs);
@@ -94,10 +85,10 @@ export default function OverlayPage() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 18 }}>📺</span>
             <div>
-              <span style={pageTitleStyle}>TV Overlay Preview</span>
+              <span style={pageTitleStyle}>Live Screen View</span>
               <span style={pageSubStyle}>
                 {" "}
-                — simulates what appears on each bar screen
+                — exactly what guests see on each screen right now
               </span>
             </div>
           </div>
@@ -213,13 +204,12 @@ export default function OverlayPage() {
       </div>
 
       <div style={footerStyle}>
-        Syncing live from Supabase · auto-advancing on expiry ·{" "}
         <Link href="/" style={footerLinkStyle}>
-          Customer view
+          Guest view
         </Link>{" "}
         ·{" "}
         <Link href="/dashboard" style={footerLinkStyle}>
-          Staff dashboard
+          Dashboard
         </Link>
       </div>
     </main>

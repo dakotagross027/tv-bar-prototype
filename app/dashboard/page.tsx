@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAdvanceExpired } from "../hooks/useAdvanceExpired";
+import { useStaffAuth } from "../hooks/useStaffAuth";
 import {
   advanceTVInDB,
   confirmRequest,
@@ -16,28 +18,42 @@ import type { PendingRequest, TV } from "../prototype";
 import {
   formatRemaining,
   priorityLabel,
-  SLOT_SECONDS,
   sortQueue,
   type Priority,
   type RequestItem,
 } from "../prototype";
 
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+// Route protection is handled by middleware.ts (HMAC-signed HttpOnly cookie).
+// If this component renders, the user is already authenticated.
+
 export default function DashboardPage() {
+  const { signOut } = useStaffAuth();
+  return <DashboardContent onSignOut={signOut} />;
+}
+
+function DashboardContent({ onSignOut }: { onSignOut: () => void }) {
   const [tvs, setTvs] = useState<TV[]>([]);
   const [pending, setPending] = useState<PendingRequest[]>([]);
   const [dbError, setDbError] = useState<string | null>(null);
-  const [tick, setTick] = useState(Date.now());
   // Track which TVs have an in-flight advance so the button disables & spins
   const [advancing, setAdvancing] = useState<Record<string, boolean>>({});
   // Per-card error messages (keyed by TV id) shown beneath the Now Playing block
   const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
   // In-flight confirm/decline per request id
   const [confirming, setConfirming] = useState<Record<string, boolean>>({});
-
-  const tvsRef = useRef<TV[]>([]);
+  // Success banner shown after a bartender confirms a request
+  const [successBanner, setSuccessBanner] = useState<{ game: string; tvName: string } | null>(null);
   useEffect(() => {
-    tvsRef.current = tvs;
-  }, [tvs]);
+    if (!successBanner) return;
+    const t = setTimeout(() => setSuccessBanner(null), 5000);
+    return () => clearTimeout(t);
+  }, [successBanner]);
+  // Show internal reset button only when ?dev param is present in the URL
+  const [showReset, setShowReset] = useState(false);
+  useEffect(() => {
+    setShowReset(new URLSearchParams(window.location.search).has("dev"));
+  }, []);
 
   // Monotonic generation counter shared by ALL loadTVs call-sites on this page.
   // Any loadTVs() call increments it before awaiting and checks it on return;
@@ -82,40 +98,18 @@ export default function DashboardPage() {
       });
   }, []);
 
-  // Per-second tick: update countdown display + advance expired slots.
-  // After any advance, immediately re-fetch from DB rather than waiting for
-  // realtime — realtime latency is the root cause of "timer hit 0, nothing happened."
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      setTick(Date.now());
-      const now = Date.now();
-      // Small fudge: treat "expiring within 100ms" as expired to absorb setInterval jitter
-      const expired = tvsRef.current.filter(
-        (tv) => tv.currentEndsAt !== null && tv.currentEndsAt <= now + 100
-      );
-      if (expired.length === 0) return;
-
-      for (const tv of expired) {
-        try {
-          await advanceTVInDB(tv.id);
-        } catch (err) {
-          console.error(
-            `[BarTV] timer advance failed for ${tv.id}:`,
-            err instanceof Error ? err.message : err
-          );
-        }
-      }
-      // Force-refresh UI immediately — don't rely on realtime delivery.
-      // freshLoad guards against a concurrent stale realtime refresh winning.
-      await freshLoad("timer");
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Single hook drives the 1-second tick for countdown display AND advances
+  // expired slots.  The DB's atomic conditional UPDATE prevents double-advance.
+  const tick = useAdvanceExpired(tvs, () => freshLoad("timer"));
 
   // Polling fallback: every 15 s re-fetch so the view stays current even if
   // realtime misses an event (e.g. subscription hiccup, tab in background).
+  // Both TV state and pending requests are refreshed together.
   useEffect(() => {
-    const poll = setInterval(() => freshLoad("poll"), 15_000);
+    const poll = setInterval(() => {
+      freshLoad("poll");
+      freshLoadPending();
+    }, 15_000);
     return () => clearInterval(poll);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -143,6 +137,16 @@ export default function DashboardPage() {
         tv.queue.filter((r) => r.priority === "next" || r.priority === "boost")
           .length
       );
+    }, 0);
+  }, [tvs]);
+
+  const revenueInQueue = useMemo(() => {
+    return tvs.reduce((sum, tv) => {
+      return sum + tv.queue.reduce((s, r) => {
+        if (r.priority === "next")  return s + 10;
+        if (r.priority === "boost") return s + 3;
+        return s;
+      }, 0);
     }, 0);
   }, [tvs]);
 
@@ -202,10 +206,12 @@ export default function DashboardPage() {
   }
 
   async function handleConfirm(id: string) {
+    const req = pending.find((r) => r.id === id);
     setConfirming((prev) => ({ ...prev, [id]: true }));
     try {
       await confirmRequest(id);
       await Promise.all([freshLoad("confirm"), freshLoadPending()]);
+      if (req) setSuccessBanner({ game: req.game, tvName: req.tvName });
     } catch (err: unknown) {
       console.error("[BarTV] confirmRequest failed:", err instanceof Error ? err.message : err);
     } finally {
@@ -269,7 +275,7 @@ export default function DashboardPage() {
                   BarTV <span style={staffBadgeStyle}>STAFF</span>
                 </div>
                 <div style={brandTaglineStyle}>
-                  Manage screens, queues, and timers
+                  Live bar management
                 </div>
               </div>
             </div>
@@ -281,10 +287,10 @@ export default function DashboardPage() {
                 TV Overlays
               </Link>
               <Link href="/" style={navLinkStyle}>
-                Customer View
+                Guest View
               </Link>
-              <button onClick={clearAll} style={resetButtonStyle}>
-                Reset
+              <button onClick={onSignOut} style={signOutButtonStyle}>
+                Sign out
               </button>
             </div>
           </div>
@@ -295,58 +301,82 @@ export default function DashboardPage() {
         {/* Stats row */}
         <div style={statsRowStyle}>
           <div style={statCardStyle}>
-            <div style={statValueStyle}>{totalRequestsTonight}</div>
-            <div style={statLabelStyle}>Items tonight</div>
+            <div style={{ ...statValueStyle, color: revenueInQueue > 0 ? "#86efac" : "#f1f5f9" }}>
+              ${revenueInQueue}
+            </div>
+            <div style={statLabelStyle}>Revenue Tonight</div>
+          </div>
+          <div style={statCardStyle}>
+            <div style={{ ...statValueStyle, color: paidQueueCount > 0 ? "#fbbf24" : "#f1f5f9" }}>
+              {paidQueueCount}
+            </div>
+            <div style={statLabelStyle}>Paid Requests Waiting</div>
           </div>
           <div style={statCardStyle}>
             <div style={statValueStyle}>
               {activeCount} / {tvs.length}
             </div>
-            <div style={statLabelStyle}>TVs active</div>
+            <div style={statLabelStyle}>Screens Active</div>
           </div>
           <div style={statCardStyle}>
-            <div
-              style={{
-                ...statValueStyle,
-                color: paidQueueCount > 0 ? "#fbbf24" : "#f1f5f9",
-              }}
-            >
-              {paidQueueCount}
+            <div style={{ ...statValueStyle, color: pending.length > 0 ? "#f87171" : "#f1f5f9" }}>
+              {pending.length}
             </div>
-            <div style={statLabelStyle}>Paid requests queued</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statValueStyle}>{SLOT_SECONDS}s</div>
-            <div style={statLabelStyle}>Slot on advance</div>
+            <div style={statLabelStyle}>Bartender Actions</div>
           </div>
         </div>
+
+        {/* Success banner — shown after bartender confirms a request */}
+        {successBanner && (
+          <div style={successBannerStyle}>
+            <div style={successBannerIconStyle}>✓</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={successBannerTitleStyle}>
+                Now Playing on {successBanner.tvName}
+              </div>
+              <div style={successBannerGameStyle}>{successBanner.game}</div>
+            </div>
+            <button onClick={() => setSuccessBanner(null)} style={successBannerDismissStyle}>×</button>
+          </div>
+        )}
 
         {/* Pending confirmation panel */}
         {pending.length > 0 && (
           <div style={pendingSectionStyle}>
             <div style={pendingSectionHeaderStyle}>
-              <div style={pendingSectionTitleStyle}>PENDING CONFIRMATION</div>
+              <div style={pendingSectionTitleStyle}>⚡ NEW REQUESTS WAITING</div>
               <div style={pendingCountBadgeStyle}>{pending.length}</div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {pending.map((req) => {
                 const busy = !!confirming[req.id];
                 return (
-                  <div key={req.id} style={pendingRowStyle}>
-                    <div style={pendingRowInfoStyle}>
-                      <div style={pendingRowTvStyle}>{req.tvName}</div>
-                      <div style={pendingRowGameStyle}>{req.game}</div>
-                      <div style={priorityTagStyle(req.priority)}>
-                        {priorityLabel(req.priority)}
+                  <div key={req.id} style={pendingCardItemStyle}>
+                    <div style={pendingCardTopBarStyle}>
+                      <span style={pendingNewLabelStyle}>NEW REQUEST</span>
+                      <span style={pendingTimeAgoStyle}>{timeAgo(req.createdAt)}</span>
+                    </div>
+                    <div style={pendingCardBodyStyle}>
+                      <div style={pendingDetailRowStyle}>
+                        <span style={pendingDetailLabelStyle}>Screen</span>
+                        <span style={pendingDetailValueStyle}>{req.tvName}</span>
+                      </div>
+                      <div style={pendingDetailRowStyle}>
+                        <span style={pendingDetailLabelStyle}>Game</span>
+                        <span style={pendingDetailValueStyle}>{req.game}</span>
+                      </div>
+                      <div style={pendingDetailRowStyle}>
+                        <span style={pendingDetailLabelStyle}>Tier</span>
+                        <span style={priorityTagStyle(req.priority)}>{priorityLabel(req.priority)}</span>
                       </div>
                     </div>
-                    <div style={pendingRowActionsStyle}>
+                    <div style={pendingCardActionsStyle}>
                       <button
                         onClick={() => !busy && handleConfirm(req.id)}
                         disabled={busy}
                         style={confirmButtonStyle(busy)}
                       >
-                        {busy ? "…" : "Confirm"}
+                        {busy ? "…" : "✓ Confirm"}
                       </button>
                       <button
                         onClick={() => !busy && handleDecline(req.id)}
@@ -381,14 +411,13 @@ export default function DashboardPage() {
               <div key={tv.id} style={cardStyle(tv.locked)}>
                 {/* Card header */}
                 <div style={cardHeaderStyle}>
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
-                  >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={tvLabelStyle}>{tv.name}</div>
-                    <div style={statusDotStyle(tv.locked)} />
-                    <div style={statusTextStyle(tv.locked)}>
-                      {tv.locked ? "Locked" : "Open"}
-                    </div>
+                    {tv.locked ? (
+                      <span style={lockedBadgeStyle}>🔒 Locked</span>
+                    ) : (
+                      <span style={autoBadgeStyle} title="Timer-based auto-advance is active">⚡ Auto</span>
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
@@ -399,16 +428,16 @@ export default function DashboardPage() {
                         isAdvancing
                           ? "Advancing…"
                           : canAdvance
-                          ? "Advance to next in queue"
+                          ? "Skip to next in queue"
                           : "Nothing to advance"
                       }
                     >
-                      {isAdvancing ? "…" : "Advance"}
+                      {isAdvancing ? "…" : "Skip"}
                     </button>
                     <button
                       onClick={() => toggleLock(tv.id)}
                       style={actionButtonStyle(
-                        tv.locked ? "#166534" : "#991b1b"
+                        tv.locked ? "#166534" : "#7c3aed"
                       )}
                     >
                       {tv.locked ? "Unlock" : "Lock"}
@@ -421,20 +450,20 @@ export default function DashboardPage() {
                   <div style={nowPlayingLabelStyle}>NOW PLAYING</div>
                   <div style={nowPlayingGameStyle}>
                     {tv.currentGame ?? (
-                      <span style={{ color: "#475569" }}>Idle</span>
+                      <span style={{ color: "#22c55e", fontSize: 15 }}>Available Now</span>
                     )}
                   </div>
                   <div
                     style={{
                       fontSize: 13,
-                      color: urgent ? "#fb923c" : "#64748b",
+                      color: urgent ? "#fb923c" : tv.currentGame ? "#64748b" : "#334155",
                       fontWeight: urgent ? 700 : 400,
                       fontVariantNumeric: "tabular-nums",
                     }}
                   >
                     {tv.currentGame
                       ? `⏱ ${formatRemaining(remaining)} remaining`
-                      : "No active content — queue a request"}
+                      : "Open — guests can request this screen"}
                   </div>
                   {cardError && (
                     <div style={cardErrorStyle}>{cardError}</div>
@@ -455,7 +484,7 @@ export default function DashboardPage() {
 
                   {sorted.length === 0 ? (
                     <div style={emptyQueueStyle}>
-                      No requests yet — share the QR code
+                      Queue is open — share the QR to get requests
                     </div>
                   ) : (
                     <>
@@ -502,12 +531,28 @@ export default function DashboardPage() {
             );
           })}
         </div>
+
+        {/* Internal tools — only visible at /dashboard?dev */}
+        {showReset && (
+          <div style={resetZoneStyle}>
+            <button onClick={clearAll} style={resetButtonStyle}>
+              Reset to demo state
+            </button>
+          </div>
+        )}
       </div>
     </main>
   );
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function timeAgo(ms: number): string {
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 1) return "just now";
+  if (mins === 1) return "1 min ago";
+  return `${mins} min ago`;
+}
 
 function queueBreakdown(queue: RequestItem[]): string {
   const counts: Record<Priority, number> = { next: 0, boost: 0, free: 0 };
@@ -614,14 +659,14 @@ const navLinkStyle: React.CSSProperties = {
   background: "#0f172a",
 };
 
-const resetButtonStyle: React.CSSProperties = {
+const signOutButtonStyle: React.CSSProperties = {
   fontSize: 13,
-  color: "#fca5a5",
+  color: "#94a3b8",
   fontWeight: 600,
   padding: "6px 12px",
   borderRadius: 8,
-  border: "1px solid #7f1d1d",
-  background: "#1c0a0a",
+  border: "1px solid #1e293b",
+  background: "#0f172a",
   cursor: "pointer",
 };
 
@@ -681,23 +726,25 @@ const tvLabelStyle: React.CSSProperties = {
   color: "#f1f5f9",
 };
 
-function statusDotStyle(locked: boolean): React.CSSProperties {
-  return {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    background: locked ? "#ef4444" : "#22c55e",
-    flexShrink: 0,
-  };
-}
+const autoBadgeStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  padding: "2px 8px",
+  borderRadius: 999,
+  background: "#052e16",
+  color: "#86efac",
+  border: "1px solid #14532d",
+};
 
-function statusTextStyle(locked: boolean): React.CSSProperties {
-  return {
-    fontSize: 12,
-    fontWeight: 600,
-    color: locked ? "#fca5a5" : "#86efac",
-  };
-}
+const lockedBadgeStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  padding: "2px 8px",
+  borderRadius: 999,
+  background: "#1c0a0a",
+  color: "#fca5a5",
+  border: "1px solid #7f1d1d",
+};
 
 const nowPlayingSectionStyle: React.CSSProperties = {
   background: "#080e1a",
@@ -881,7 +928,7 @@ const cardErrorStyle: React.CSSProperties = {
 };
 
 const pendingSectionStyle: React.CSSProperties = {
-  background: "#0f172a",
+  background: "#0a1628",
   border: "1px solid #1e3a5f",
   borderRadius: 16,
   padding: "18px 20px",
@@ -896,89 +943,185 @@ const pendingSectionHeaderStyle: React.CSSProperties = {
 };
 
 const pendingSectionTitleStyle: React.CSSProperties = {
-  fontSize: 11,
+  fontSize: 12,
   fontWeight: 800,
-  letterSpacing: "0.1em",
-  color: "#60a5fa",
+  letterSpacing: "0.08em",
+  color: "#f87171",
   textTransform: "uppercase",
 };
 
 const pendingCountBadgeStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
-  background: "#172554",
-  color: "#93c5fd",
-  border: "1px solid #1e40af",
+  background: "#450a0a",
+  color: "#fca5a5",
+  border: "1px solid #7f1d1d",
   borderRadius: 999,
   padding: "1px 8px",
 };
 
-const pendingRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 12,
+const pendingCardItemStyle: React.CSSProperties = {
   background: "#080e1a",
-  border: "1px solid #1e293b",
+  border: "1px solid #1e3a5f",
+  borderLeft: "3px solid #3b82f6",
   borderRadius: 10,
-  padding: "10px 14px",
-  flexWrap: "wrap",
+  overflow: "hidden",
 };
 
-const pendingRowInfoStyle: React.CSSProperties = {
+const pendingCardTopBarStyle: React.CSSProperties = {
   display: "flex",
+  justifyContent: "space-between",
   alignItems: "center",
-  gap: 10,
-  flex: 1,
-  minWidth: 0,
-  flexWrap: "wrap",
+  padding: "8px 14px",
+  background: "#0d1f3c",
+  borderBottom: "1px solid #1e3a5f",
 };
 
-const pendingRowTvStyle: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 700,
+const pendingNewLabelStyle: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 800,
+  letterSpacing: "0.1em",
+  color: "#60a5fa",
+  textTransform: "uppercase",
+};
+
+const pendingTimeAgoStyle: React.CSSProperties = {
+  fontSize: 11,
   color: "#475569",
-  flexShrink: 0,
+  fontWeight: 500,
 };
 
-const pendingRowGameStyle: React.CSSProperties = {
+const pendingCardBodyStyle: React.CSSProperties = {
+  padding: "12px 14px 8px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+const pendingDetailRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  gap: 10,
+};
+
+const pendingDetailLabelStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: "#334155",
+  width: 44,
+  flexShrink: 0,
+  textTransform: "uppercase",
+  letterSpacing: "0.05em",
+};
+
+const pendingDetailValueStyle: React.CSSProperties = {
   fontSize: 14,
   fontWeight: 600,
   color: "#e2e8f0",
-  flex: 1,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
 };
 
-const pendingRowActionsStyle: React.CSSProperties = {
+const pendingCardActionsStyle: React.CSSProperties = {
   display: "flex",
-  gap: 6,
-  flexShrink: 0,
+  gap: 8,
+  padding: "10px 14px 12px",
 };
 
 function confirmButtonStyle(disabled: boolean): React.CSSProperties {
   return {
-    fontSize: 12,
-    fontWeight: 700,
-    padding: "6px 14px",
-    borderRadius: 8,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: 800,
+    padding: "11px 16px",
+    borderRadius: 10,
     border: "none",
-    background: disabled ? "#1e293b" : "#166534",
-    color: disabled ? "#475569" : "#86efac",
+    background: disabled ? "#1e293b" : "#16a34a",
+    color: disabled ? "#475569" : "#ffffff",
     cursor: disabled ? "not-allowed" : "pointer",
+    letterSpacing: "0.01em",
   };
 }
 
 function declineButtonStyle(disabled: boolean): React.CSSProperties {
   return {
-    fontSize: 12,
-    fontWeight: 700,
-    padding: "6px 14px",
-    borderRadius: 8,
-    border: "none",
-    background: disabled ? "#1e293b" : "#450a0a",
-    color: disabled ? "#475569" : "#fca5a5",
+    fontSize: 13,
+    fontWeight: 600,
+    padding: "11px 14px",
+    borderRadius: 10,
+    border: "1px solid #1e293b",
+    background: "transparent",
+    color: disabled ? "#334155" : "#64748b",
     cursor: disabled ? "not-allowed" : "pointer",
   };
 }
+
+// Success banner
+const successBannerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 16,
+  background: "linear-gradient(135deg, #052e16 0%, #0a3622 100%)",
+  border: "1px solid #16a34a",
+  borderRadius: 14,
+  padding: "16px 20px",
+  marginBottom: 20,
+  boxShadow: "0 0 24px rgba(22,163,74,0.25), 0 0 0 1px rgba(22,163,74,0.1)",
+};
+
+const successBannerIconStyle: React.CSSProperties = {
+  width: 36,
+  height: 36,
+  borderRadius: "50%",
+  background: "#16a34a",
+  color: "white",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 18,
+  fontWeight: 800,
+  flexShrink: 0,
+};
+
+const successBannerTitleStyle: React.CSSProperties = {
+  fontSize: 15,
+  fontWeight: 800,
+  color: "#86efac",
+  marginBottom: 2,
+};
+
+const successBannerGameStyle: React.CSSProperties = {
+  fontSize: 13,
+  color: "#4ade80",
+  fontWeight: 500,
+};
+
+const successBannerDismissStyle: React.CSSProperties = {
+  background: "none",
+  border: "none",
+  color: "#166534",
+  fontSize: 20,
+  cursor: "pointer",
+  padding: "0 4px",
+  lineHeight: 1,
+  flexShrink: 0,
+};
+
+// Reset zone
+const resetZoneStyle: React.CSSProperties = {
+  marginTop: 48,
+  paddingTop: 24,
+  borderTop: "1px solid #0f172a",
+  display: "flex",
+  justifyContent: "center",
+};
+
+const resetButtonStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#475569",
+  fontWeight: 500,
+  padding: "6px 14px",
+  borderRadius: 8,
+  border: "1px solid #1e293b",
+  background: "none",
+  cursor: "pointer",
+};
+

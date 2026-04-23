@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { addRequest, advanceTVInDB, loadRequestStatus, loadTVs, resetAllTVs } from "../lib/db";
+import { useAdvanceExpired } from "./hooks/useAdvanceExpired";
+import { addRequest, loadRequestStatus, loadTVs } from "../lib/db";
 import { useSupabaseSync } from "./hooks/useSupabaseSync";
 import {
   type Priority,
@@ -13,13 +13,14 @@ import {
   SAMPLE_GAMES,
 } from "./prototype";
 
+const venueName = process.env.NEXT_PUBLIC_VENUE_NAME ?? "The Anchor";
+
 export default function Home() {
   const [tvs, setTvs] = useState<TV[]>([]);
   const [dbError, setDbError] = useState<string | null>(null);
   const [selectedTvId, setSelectedTvId] = useState<string>("A");
   const [gameName, setGameName] = useState("");
   const [priority, setPriority] = useState<Priority>("free");
-  const [tick, setTick] = useState(Date.now());
   const [message, setMessage] = useState("");
 
   // Pending confirmation tracking: set after a successful submit,
@@ -31,10 +32,6 @@ export default function Home() {
     priority: Priority;
   } | null>(null);
   const [submittedStatus, setSubmittedStatus] = useState<RequestStatus>("pending");
-
-  // Always-fresh ref so the setInterval closure sees current TV state.
-  const tvsRef = useRef<TV[]>([]);
-  useEffect(() => { tvsRef.current = tvs; }, [tvs]);
 
   // Monotonic generation counter — shared by all explicit loadTVs call-sites.
   // Any call increments the counter before awaiting; on return it only applies
@@ -65,44 +62,13 @@ export default function Home() {
       });
   }, []);
 
-  // Per-second tick: drives countdown display AND advances any expired slots.
-  //
-  // Why advance here too (not just on the staff/overlay pages)?
-  // The atomic conditional UPDATE — WHERE current_ends_at ≤ now() RETURNING id —
-  // means only ONE tab can ever claim a given advance; concurrent tabs get 0 rows
-  // back and return silently.  So there is no multi-tab double-advance race.
-  // Without this timer, a customer who has ONLY the customer page open sees the
-  // countdown hit 0s but the queue never moves, because no other page is running.
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      setTick(Date.now());
-      const now = Date.now();
-      // +100ms fudge absorbs setInterval jitter so we don't miss the exact ms
-      const expired = tvsRef.current.filter(
-        (tv) => tv.currentEndsAt !== null && tv.currentEndsAt <= now + 100
-      );
-      if (expired.length === 0) return;
-
-      for (const tv of expired) {
-        try {
-          await advanceTVInDB(tv.id);
-        } catch (err) {
-          console.error(
-            `[BarTV] customer advance failed for ${tv.id}:`,
-            err instanceof Error ? err.message : err
-          );
-        }
-      }
-      // freshLoad bumps the generation so any concurrent stale realtime refresh
-      // (triggered by the DB mutations above) is discarded.
-      await freshLoad("customer-timer");
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Single hook drives the 1-second tick for countdown display AND advances
+  // expired slots.  The DB's atomic conditional UPDATE prevents double-advance
+  // when multiple tabs/pages fire simultaneously.
+  const tick = useAdvanceExpired(tvs, () => freshLoad("customer-timer"));
 
   // Polling fallback: 5-second interval ensures the view stays current even if
   // realtime misses an event (background tab, WebSocket hiccup, etc.).
-  // 5s is fast enough to feel live without hammering the API.
   useEffect(() => {
     const poll = setInterval(() => freshLoad("customer-poll"), 5_000);
     return () => clearInterval(poll);
@@ -178,19 +144,6 @@ export default function Home() {
     }
   }
 
-  async function clearAll() {
-    try {
-      await resetAllTVs();
-      setSelectedTvId("A");
-      setGameName("");
-      setPriority("free");
-      setMessage("Prototype reset.");
-      freshLoad("clearAll").catch(console.error);
-    } catch (err: unknown) {
-      setMessage(err instanceof Error ? `Reset failed: ${err.message}` : "Reset failed.");
-    }
-  }
-
   if (dbError) {
     return (
       <main style={mainStyle}>
@@ -233,21 +186,16 @@ export default function Home() {
             <div style={brandStyle}>
               <span style={{ fontSize: 30, lineHeight: 1 }}>📺</span>
               <div>
-                <div style={brandNameStyle}>BarTV</div>
+                <div style={brandNameStyle}>{venueName}</div>
                 <div style={brandTaglineStyle}>
-                  Request what&apos;s on the TVs — no bartender needed
+                  Request what&apos;s on the screens
                 </div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <span style={liveBadge}>
-                <span style={liveDot} />
-                {openTvCount} TV{openTvCount !== 1 ? "s" : ""} open
-              </span>
-              <Link href="/dashboard" style={navLinkStyle}>
-                Staff →
-              </Link>
-            </div>
+            <span style={liveBadge}>
+              <span style={liveDot} />
+              {openTvCount} screen{openTvCount !== 1 ? "s" : ""} open
+            </span>
           </div>
         </div>
       </header>
@@ -257,7 +205,7 @@ export default function Home() {
         <section style={{ marginBottom: 32 }}>
           <h2 style={sectionHeadingStyle}>Choose a TV</h2>
           <p style={sectionSubStyle}>
-            Tap the screen you want to request — then fill in below
+            Pick a screen, choose your game — done in 30 seconds.
           </p>
           <div style={tvGridStyle}>
             {tvs.map((tv) => {
@@ -309,7 +257,7 @@ export default function Home() {
         {/* Request form */}
         <section style={formPanelStyle}>
           <h2 style={{ ...sectionHeadingStyle, marginBottom: 4 }}>
-            What do you want to watch?
+            What game should we put on?
           </h2>
           <p style={sectionSubStyle}>
             Requesting on:{" "}
@@ -448,8 +396,8 @@ export default function Home() {
                 </div>
                 <div>
                   <div style={pendingCardTitleStyle(submittedStatus)}>
-                    {submittedStatus === "pending"   && "Pending bartender confirmation"}
-                    {submittedStatus === "confirmed" && "Request confirmed!"}
+                    {submittedStatus === "pending"   && "Awaiting staff approval"}
+                    {submittedStatus === "confirmed" && "You're in the queue!"}
                     {submittedStatus === "declined"  && "Request declined"}
                   </div>
                   <div style={pendingCardSubStyle}>
@@ -467,12 +415,12 @@ export default function Home() {
               </div>
               {submittedStatus === "pending" && (
                 <div style={pendingHintStyle}>
-                  Show this to your bartender or wait for them to confirm.
+                  Show this to your bartender — they&apos;ll confirm in moments.
                 </div>
               )}
               {submittedStatus === "confirmed" && (
                 <div style={pendingHintStyle}>
-                  Your request is in the queue — watch the TV for your turn!
+                  Watch the screen — your game is coming up!
                 </div>
               )}
               {submittedStatus === "declined" && (
@@ -484,11 +432,6 @@ export default function Home() {
           )}
         </section>
 
-        <div style={{ textAlign: "right", marginTop: 16 }}>
-          <button onClick={clearAll} style={resetLinkStyle}>
-            Reset prototype
-          </button>
-        </div>
       </div>
     </main>
   );
@@ -509,15 +452,15 @@ function priorityPrice(p: Priority): string {
 }
 
 function priorityDesc(p: Priority): string {
-  if (p === "free") return "Join the queue, no charge.";
-  if (p === "boost") return "Jump ahead of everyone who chose Free.";
-  return "You're up next. Guaranteed, no matter the queue.";
+  if (p === "free") return "Standard queue · no charge.";
+  if (p === "boost") return "Jump ahead of all free requests.";
+  return "Guaranteed #1 spot, no matter the queue.";
 }
 
 function submitLabel(p: Priority): string {
-  if (p === "free") return "Join Queue — Free";
-  if (p === "boost") return "Boost My Spot — $3";
-  return "Go Next — $10";
+  if (p === "free") return "Request This Screen";
+  if (p === "boost") return "Boost My Request — $3";
+  return "Put Me Next — $10";
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -588,17 +531,6 @@ const liveDot: React.CSSProperties = {
   height: 6,
   borderRadius: "50%",
   background: "#22c55e",
-};
-
-const navLinkStyle: React.CSSProperties = {
-  fontSize: 13,
-  color: "#60a5fa",
-  fontWeight: 600,
-  textDecoration: "none",
-  padding: "6px 12px",
-  borderRadius: 8,
-  border: "1px solid #1e40af",
-  background: "#172554",
 };
 
 const sectionHeadingStyle: React.CSSProperties = {
@@ -892,15 +824,6 @@ function messageStyle(success: boolean): React.CSSProperties {
     fontWeight: 600,
   };
 }
-
-const resetLinkStyle: React.CSSProperties = {
-  background: "none",
-  border: "none",
-  color: "#334155",
-  fontSize: 12,
-  cursor: "pointer",
-  textDecoration: "underline",
-};
 
 const dbErrorStyle: React.CSSProperties = {
   margin: "80px auto",

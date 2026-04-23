@@ -1,6 +1,64 @@
 export type Priority = "free" | "boost" | "next";
 
+// ─── Request status types ─────────────────────────────────────────────────────
+//
+// A request carries three orthogonal fields.  Each answers a different question:
+//
+//  QueueStatus   — WHERE is this request in the TV queue lifecycle?
+//  RequestStatus — WHAT did the bartender decide?
+//  PaymentStatus — WAS the guest charged?
+//
+// Queue-eligibility rule:
+//   status = 'queued' AND request_status = 'confirmed'
+//
+//   Both conditions are required.  A newly submitted request has
+//   status='queued' but request_status='pending', which keeps it invisible
+//   to advanceTVInDB and the queue display until the bartender confirms it.
+//
+// Full lifecycle:
+//
+//   [submit] ──▶ status=queued / request_status=pending   (awaiting bartender)
+//       │
+//       ├─[confirm]──▶ status=queued / request_status=confirmed   (in queue)
+//       │                  │
+//       │              [advance]──▶ status=active ──[advance]──▶ status=done
+//       │
+//       └─[decline]──▶ status=done / request_status=declined
+//
+// DB constraint (requests_status_check): queued | active | done | cancelled
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Position in the TV queue lifecycle.
+ * Must match the DB check constraint on requests.status.
+ *
+ *  queued     In the queue.  request_status determines if it's visible:
+ *               pending   → awaiting bartender confirmation (hidden from queue)
+ *               confirmed → queue-eligible (sorted and displayed)
+ *  active     Currently playing on the TV (set by advanceTVInDB).
+ *  done       Slot finished or request was declined. Terminal.
+ *  cancelled  Cancelled before it was played (reserved for future use).
+ */
+export type QueueStatus = "queued" | "active" | "done" | "cancelled";
+
+/**
+ * Bartender approval outcome.
+ * Kept as a separate field so the decision is recorded even after the request
+ * moves to 'done', and so customers can poll for their result.
+ *
+ *  pending    Awaiting bartender action.
+ *  confirmed  Bartender approved — request entered (or will enter) the queue.
+ *  declined   Bartender rejected — request ended at 'done', never queued.
+ */
 export type RequestStatus = "pending" | "confirmed" | "declined";
+
+/**
+ * Billing outcome.
+ *
+ *  awaiting_confirmation  Request not yet reviewed; no charge decision made.
+ *  charged                Guest was charged (non-free, confirmed requests).
+ *  not_charged            Free tier, or request was declined.
+ */
 export type PaymentStatus = "awaiting_confirmation" | "charged" | "not_charged";
 
 export type RequestItem = {

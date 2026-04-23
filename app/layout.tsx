@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BarTV — Claim your screen",
-  description: "Request what's on the TVs before you ask the bartender.",
+  title: "BarTV — Control What's On",
+  description: "Request your game, choose your priority, and get it on the screen — powered by BarTV.",
 };
 
 export default function RootLayout({
