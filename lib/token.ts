@@ -1,12 +1,10 @@
 /**
- * HMAC-SHA256 token helpers — shared by middleware.ts and the staff-auth API route.
+ * HMAC-SHA256 token helpers — shared by proxy.ts and the staff-auth API route.
  *
- * Kept in a separate module so middleware.ts stays a pure Next.js middleware
- * file (only exporting `middleware` and `config`).  Importing from middleware.ts
- * in other files can prevent Vercel from recognising it as middleware.
+ * Kept in a separate module so proxy.ts stays a pure Next.js proxy file
+ * (only exporting `proxy` and `config`).
  *
- * Uses the Web Crypto API (crypto.subtle), which is available in both the
- * Next.js Edge Runtime and Node.js 18+.
+ * Uses the Web Crypto API (crypto.subtle), available in Node.js 18+.
  */
 
 const COOKIE_NAME = "bartv_staff_token";
