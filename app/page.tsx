@@ -179,6 +179,28 @@ export default function Home() {
 
   return (
     <main style={mainStyle}>
+      {/* V2 preview badge — fixed, non-intrusive */}
+      <a
+        href="/v2"
+        style={{
+          position: "fixed",
+          bottom: 20,
+          right: 20,
+          background: "#1d4ed8",
+          color: "white",
+          fontSize: 11,
+          fontWeight: 700,
+          padding: "8px 16px",
+          borderRadius: 999,
+          textDecoration: "none",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          zIndex: 100,
+          letterSpacing: "0.04em",
+          border: "1px solid rgba(96,165,250,0.3)",
+        }}
+      >
+        Preview V2 →
+      </a>
       {/* Header */}
       <header style={headerStyle}>
         <div style={contentStyle}>
